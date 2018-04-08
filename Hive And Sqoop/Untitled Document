@@ -1,0 +1,156 @@
+hive (mvi_lns)> CREATE DATABASE IF NOT EXISTS mvi_lns COMMENT 'THIS DATABASE IS SOLELY USED FOR MOVIE LENS ANALYTICS' LOCATION '/hive/mvi_lns';
+USE mvi_lns;
+hive (mvi_lns)> CREATE EXTERNAL TABLE IF NOT EXISTS mvi_raw_data (m_string string);
+
+hive (mvi_lns)> ALTER TABLE mvi_raw_data RENAME TO mvi_data_raw;
+hive (mvi_lns)> SELECT * FROM mvi_data_raw LIMIT 10;
+CREATE EXTERNAL TABLE IF NOT EXISTS mvi_raw_dlim as select regexp_replace(m_string, '::','@') from mvi_raw_data;
+
+testing if the year can be extracted from the name
+hive (mvi_lns)> SELECT TRIM(SUBSTR(m_name, INSTR(m_name,"(")+1, 4)) FROM mvi_data_raw LIMIT 10;(this can be used to cleans data)
+or
+hive (mvi_lns)> select regexp_extract(m_name, '[0-9]+', 0) from mvi_data_raw limit 10;
+
+CREATE EXTERNAL TABLE IF NOT EXISTS mvi_data_stg
+(m_id int, m_name string, genre array<string>)
+COMMENT 'THIS IS TEXT TABLE WITHOUT DELIMITERS'
+ROW FORMAT DELIMITED 
+FIELDS TERMINATED BY '@'
+COLLECTION ITEMS TERMINATED BY '|'
+LINES TERMINATED BY '\n'
+STORED AS TEXTFILE;
+
+Downloaded the file and loaded it into mvi_data_stg using load data local inpath
+Need to try 7 line with above create query
+
+CREATE TABLE IF NOT EXISTS mvi_raw_stg_year as select mvi_data_stg.m_id, mvi_data_stg.m_name, mvi_data_stg.m_genre, regexp_extract(mvi_data_stg.m_name, '[0-9]+', 0) year from mvi_data_stg;
+
+Need to create orc table with partitions and bucket.
+
+if the table is partitioned, then LOAD DATA LOCAL INPATH 'path' INTO TABLE TEST; should have PARTITION CLAUSE in it. And hence, check the data file if there are any pre-created partitions. Else need to create staging table and then load into partition table.
+
+Need to create a SINGLE Column file with sting format,
+Clean the data having a single delimiter like ',' and then load into the above given table
+
+
+hadoop fs -ls 'hdfs://localhost:9000/.....' list of files in directory
+
+to add columns in table -> hive (mvi_lns)> alter table mvi_data_stg add cloumns (year int);
+to drop any column in a table -> alter table mvi_data_stg replace columns (m_id int, m_name string, m_genre array<string>);
+
+CREATE TABLE IF NOT EXISTS mvi_text_stg
+(m_id int, m_name string, m_genre array<string>)
+PARTITIONED BY (year int)
+STORED AS TEXTFILE;
+
+set hive.exec.dynamic.partition.mode=non-strict;
+INSERT INTO mvi_orc_stg PARTITION (year) SELECT * FROM mvi_raw_stg_year;
+
+
+
+need to check mapreduce.map.memory.mb
+
+----------------------------------------------------
+CREATE TABLE movie.mvi_dlim (ID int, MTITLE string, GENRE string)
+ROW FORMAT DELIMITED 
+FIELDS TERMINATED BY '@'
+LINES TERMINATED BY '\n'
+STORED AS TEXTFILE
+LOCATION '/hive/mvi/movies/'
+AS select regexp_replace(col1,"::",":") from primary;
+
+INSERT INTO mvi_dlim SELECT split(col1, '\\::')[0] as id,
+split(col1, '\\::')[1] as mtitle,
+split(col1, '\\::')[2] as genre
+from primary;
+
+CREATE TABLE mvi_dlim_sub 
+AS select id, mtitle, substr(regexp_extract(mtitle,"\\((\\d){4}\\)",0),2,4) rel_year, split(genre, '\\|')[0] genre1, 
+split(genre, '\\|')[1] genre2, split(genre, '\\|')[2] genre3, split(genre, '\\|')[3] genre4
+from mvi_dlim;
+
+(NOTE: Never ever keep the partition column in the table creation script)
+CREATE TABLE mvi_dlim_main
+(ID INT, M_TITLE STRING, GENRE1 STRING, GENRE2 STRING, GENRE3 STRING)
+PARTITIONED BY (REL_YEAR INT)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '|'
+LINES TERMINATED BY '\n'
+STORED AS TEXTFILE; 
+
+set hive.exec.dynamic.partition.mode = nonstrict
+(NOTE: Need to order the column names according to the insertion of data. Partition will be taken from the last column of any table)
+INSERT INTO mvi_dlim_main partition (rel_year) select id, mtitle, genre1, genre2, genre3, rel_year from mvi_dlim_sub;
+
+Number of movies per year
+select rel_year, count(*) from mvi_dlim_main group by rel_year; 
+
+Swipe partition:
+
+Loading partitioned data into External table is possible as given below:
+CREATE EXTERNAL TABLE mvi_dlim_main_temp
+(ID INT, M_TITLE STRING, GENRE1 STRING, GENRE2 STRING, GENRE3 STRING)
+PARTITIONED BY (REL_YEAR INT)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '|'
+LINES TERMINATED BY '\n'
+STORED AS TEXTFILE; 
+INSERT INTO mvi_dlim_main_ext partition (rel_year) select id, mtitle, genre1, genre2, genre3, rel_year from mvi_dlim_sub;
+
+
+CREATE TABLE mvi_dlim_stg
+(ID INT, M_TITLE STRING, GENRE1 STRING, GENRE2 STRING, GENRE3 STRING)
+PARTITIONED BY (REL_YEAR INT)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '|'
+LINES TERMINATED BY '\n'
+STORED AS TEXTFILE; 
+
+INSERT INTO mvi_dlim_stg partition (rel_year) select id, mtitle, genre1, genre2, genre3 from mvi_dlim_main where rel_year = 1995;
+msck repair table mvi_dlim_stg; (This is to add the partition value to the metastore and hence cna be queried further )
+
+
+
+
+-------------------------------------------
+CREATE TABLE mvi_incremental
+(ID INT, M_TITLE STRING, YEAR INT, GENRE1 STRING, GENRE2 STRING, GENRE3 STRING)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '|'
+LINES TERMINATED BY '\n'
+STORED AS TEXTFILE; 
+
+CREATE TABLE mvi_dlim_main_temp
+(ID INT, M_TITLE STRING, GENRE1 STRING, GENRE2 STRING, GENRE3 STRING)
+PARTITIONED BY (REL_YEAR INT)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '|'
+LINES TERMINATED BY '\n'
+STORED AS TEXTFILE; 
+
+create table mvi_dlim_tgt
+as
+select * from (
+select t.*, DENSE_RANK() OVER (PARTITION BY id ORDER BY M_TITLE) rn from  
+(select * from 
+mvi_dlim_main_temp
+UNION
+select * from 
+mvi_dlim_stg) t ) tt where tt.rn = 1;
+
+truncate table mvi_dlim_main_temp;
+
+truncate table mvi_dlim_stg;
+
+ALTER TABLE mvi_dlim_main DROP PARTITION (rel_year = 1995);
+
+insert into mvi_dlim_main partition(rel_year=1995,rel_year=2017) select id, m_title, genre1, genre2, genre3, rel_year from mvi_dlim_tgt;
+
+DROP TABLE mvi_dlim_tgt;
+
+--ALTER TABLE mvi_dlim_main DROP PARTITION (rel_year = 1995);
+
+--ALTER TABLE mvi_dlim_main EXCHANGE PARTITION (rel_year=1995, rel_year=2017) WITH TABLE mvi_dlim_main_temp;
+
+
+

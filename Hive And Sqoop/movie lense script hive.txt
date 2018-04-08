@@ -1,0 +1,102 @@
+CREATE TABLE movie.mvi_dlim (ID int, MTITLE string, GENRE string)
+ROW FORMAT DELIMITED 
+FIELDS TERMINATED BY '@'
+LINES TERMINATED BY '\n'
+STORED AS TEXTFILE
+LOCATION '/hive/mvi/movies/'
+AS select regexp_replace(col1,"::",":") from primary;
+
+INSERT INTO mvi_dlim SELECT split(col1, '\\::')[0] as id,
+split(col1, '\\::')[1] as mtitle,
+split(col1, '\\::')[2] as genre
+from primary;
+
+CREATE TABLE mvi_dlim_sub 
+AS select id, mtitle, substr(regexp_extract(mtitle,"\\((\\d){4}\\)",0),2,4) rel_year, split(genre, '\\|')[0] genre1, 
+split(genre, '\\|')[1] genre2, split(genre, '\\|')[2] genre3, split(genre, '\\|')[3] genre4
+from mvi_dlim;
+
+(NOTE: Never ever keep the partition column in the table creation script)
+CREATE TABLE mvi_dlim_main
+(ID INT, M_TITLE STRING, GENRE1 STRING, GENRE2 STRING, GENRE3 STRING)
+PARTITIONED BY (REL_YEAR INT)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '|'
+LINES TERMINATED BY '\n'
+STORED AS TEXTFILE; 
+
+set hive.exec.dynamic.partition.mode = nonstrict
+(NOTE: Need to order the column names according to the insertion of data. Partition will be taken from the last column of any table)
+INSERT INTO mvi_dlim_main partition (rel_year) select id, mtitle, genre1, genre2, genre3, rel_year from mvi_dlim_sub;
+
+Number of movies per year
+select rel_year, count(*) from mvi_dlim_main group by rel_year; 
+
+Swipe partition:
+
+Loading partitioned data into External table is possible as given below:
+CREATE EXTERNAL TABLE mvi_dlim_main_temp
+(ID INT, M_TITLE STRING, GENRE1 STRING, GENRE2 STRING, GENRE3 STRING)
+PARTITIONED BY (REL_YEAR INT)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '|'
+LINES TERMINATED BY '\n'
+STORED AS TEXTFILE; 
+INSERT INTO mvi_dlim_main_ext partition (rel_year) select id, mtitle, genre1, genre2, genre3, rel_year from mvi_dlim_sub;
+
+
+CREATE TABLE mvi_dlim_stg
+(ID INT, M_TITLE STRING, GENRE1 STRING, GENRE2 STRING, GENRE3 STRING)
+PARTITIONED BY (REL_YEAR INT)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '|'
+LINES TERMINATED BY '\n'
+STORED AS TEXTFILE; 
+
+INSERT INTO mvi_dlim_stg partition (rel_year) select id, mtitle, genre1, genre2, genre3 from mvi_dlim_main where rel_year = 1995;
+msck repair table mvi_dlim_stg; (This is to add the partition value to the metastore and hence cna be queried further )
+
+
+
+
+-------------------------------------------
+CREATE TABLE mvi_incremental
+(ID INT, M_TITLE STRING, YEAR INT, GENRE1 STRING, GENRE2 STRING, GENRE3 STRING)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '|'
+LINES TERMINATED BY '\n'
+STORED AS TEXTFILE; 
+
+INSERT SOME VALUES or get the data from flie or RDBMS
+
+CREATE TABLE mvi_dlim_main_temp
+(ID INT, M_TITLE STRING, GENRE1 STRING, GENRE2 STRING, GENRE3 STRING)
+PARTITIONED BY (REL_YEAR INT)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '|'
+LINES TERMINATED BY '\n'
+STORED AS TEXTFILE; 
+
+create table mvi_dlim_tgt
+as
+select * from (
+select t.*, DENSE_RANK() OVER (PARTITION BY id ORDER BY M_TITLE) rn from  
+(select * from 
+mvi_dlim_main_temp
+UNION
+select * from 
+mvi_dlim_stg) t ) tt where tt.rn = 1;
+
+truncate table mvi_dlim_main_temp;
+
+truncate table mvi_dlim_stg;
+
+ALTER TABLE mvi_dlim_main DROP PARTITION (rel_year = 1995);
+
+insert into mvi_dlim_main partition(rel_year=1995,rel_year=2017) select id, m_title, genre1, genre2, genre3, rel_year from mvi_dlim_tgt;
+
+DROP TABLE mvi_dlim_tgt;
+
+--ALTER TABLE mvi_dlim_main DROP PARTITION (rel_year = 1995);
+
+--ALTER TABLE mvi_dlim_main EXCHANGE PARTITION (rel_year=1995, rel_year=2017) WITH TABLE mvi_dlim_main_temp;

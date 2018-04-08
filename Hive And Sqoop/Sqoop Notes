@@ -1,0 +1,87 @@
+incremental refresh
+for non-mutable data
+
+sqoop import \
+--connect jdbc:mysql://localhost:3306/complaints_db \
+--username root \
+--password root \
+--table usstates \
+--incremental append \
+--check-coulmn id \
+
+
+then insert some records in database
+so example we have inserted 5 extra records
+
+then in the above code we need to add the below code in last line
+--last-value 62
+
+now to create a sqoop job give
+sqoop job --help
+
+sqoop job --create usstates_nonmutable -- import \
+--connect jdbc:mysql://localhost:3306/complaints_db \
+--username root \
+--password root \
+--table usstates \
+--incremental append \
+--check-coulmn id \
+--last-value 0 \
+
+so the above code has been stored in sqoop and we can list it using 
+sqoop job --list
+sqoop job --show [JOBNAME]
+
+to run the job we need to give
+sqoop job --exec usstates_nonmutable
+
+this will get the new data from the table everytime because the last-value is stored in metastore
+but still if we want to do a full refresh then we need to do the below
+sqoop job --exec usstates_nonmutable -- --target-dir /usstates_full --last-value 0
+
+in the above code we are using extra options....this is defined using "-- "
+
+---------------------------------------------------------------------------------------
+incremental refresh
+for mutable data`
+
+sqoop job --create usstates_mutable -- import \
+--connect jdbc:mysql://localhost:3306/complaints_db \
+--username root \
+--password root \
+--table usstates \
+--incremental lastmodified \
+--check-coulmn moddified_date \
+
+
+this will get all the records for the lates modified_date column in usstates in mysql complaints_db
+now if we modify few data in mysql table and add some new records and run the above code it will fail
+hence we need to run the code like below
+sqoop job --exec usstates_mutable -- --merge-key id 
+OR
+we can create the same job as above and add --merger-key column name
+
+to only get the incremented data we need to give the command like this
+sqoop job --exec usstates_mutable -- --target-dir /directory_name
+
+---------------------------------------------------------------------------------------
+to run a query which user wants and load into hdfs 
+
+sqoop job --create usstates_mutable -- import \
+--connect jdbc:mysql://localhost:3306/complaints_db \
+--username root \
+--password root \
+--query "select * from usstates u where state 
+like 'N%' and \$CONDITIONS" \
+--target-dir /query_out \
+--delete-target-dir \
+--split-by u.id
+
+
+how sqoop will import large objects?
+how to have better performance with mutable data with incremental refresh?
+-> we can use target-dir to get the data in a different folder
+then have a external table on top of that folder using hive
+union all query as a result
+apply row number -> partition by id, order desc -> row number = 1
+
